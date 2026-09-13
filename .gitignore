@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Data
+data/raw/*
+data/processed/*
+data/db/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/db/.gitkeep
+!data/raw/vehicle_stock.csv
+!data/raw/digital_checkout.csv
+!data/raw/sales.csv
+!data/raw/trade_in.csv
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

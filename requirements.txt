@@ -1,0 +1,10 @@
+langchain
+langchain-openai
+langgraph
+python-dotenv
+streamlit
+plotly
+sqlalchemy
+pandas
+pytest
+# sqlite3 is part of the Python standard library
