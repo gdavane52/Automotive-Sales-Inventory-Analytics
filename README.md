@@ -8,8 +8,6 @@ Dealership teams need answers about stock, sales, digital checkout, and trade-in
 
 ## Project objective
 
-Provide a small, interview-clear agentic pipeline:
-
 **Natural language question → domain validation → SQL generation → SQL validation → SQLite execution → DataFrame → LLM answer → Plotly chart → business insight → Streamlit UI**
 
 The design stays simple: one SQLite database, one LangGraph workflow, one Streamlit page. No extra orchestration frameworks.
