@@ -6,6 +6,8 @@ Does not generate SQL, execute SQL, or open database connections.
 from __future__ import annotations
 
 import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -31,9 +33,6 @@ APP_TITLE = "🚗 Automotive Sales & Inventory Analytics"
 EXAMPLE_QUESTIONS = [
     "Which are the top 10 selling car models in Pune in 2026?",
     "Which models have the highest inventory in Pune?",
-    "Which brands have the highest trade-in activity?",
-    "What is the average trade-in value by brand?",
-    "Which models have the highest checkout activity?",
 ]
 
 _SQL_GENERATION_FAILED = (
@@ -42,17 +41,6 @@ _SQL_GENERATION_FAILED = (
 )
 _NO_CHART = "A chart could not be generated from this result."
 logger = get_logger("ui")
-
-_NODE_STATUS = {
-    "validate_question": "Checking the question…",
-    "generate_sql": "Preparing the analysis…",
-    "validate_sql": "Preparing the analysis…",
-    "execute_sql": "Loading results…",
-    "generate_answer": "Writing the answer…",
-    "generate_chart": "Building the chart…",
-    "generate_insight": "Writing business insights…",
-    "validation_failed": "The query could not be completed.",
-}
 
 # Shown after a node finishes, while the next step is running.
 _STATUS_AFTER_NODE = {
@@ -66,13 +54,37 @@ _STATUS_AFTER_NODE = {
 
 
 def _use_example(question: str) -> None:
-    st.session_state["_prefill"] = question
+    st.session_state["_pending_question"] = question
+
+
+def _clear_chat() -> None:
+    st.session_state.turns = []
+    st.session_state.thread_id = str(uuid.uuid4())
+    st.session_state.selected_turn_index = None
+
+
+def _select_turn(index: int) -> None:
+    st.session_state.selected_turn_index = index
+
+
+def _show_all_turns() -> None:
+    st.session_state.selected_turn_index = None
+
+
+def _ensure_session_state() -> None:
+    if "thread_id" not in st.session_state:
+        st.session_state.thread_id = str(uuid.uuid4())
+    if "turns" not in st.session_state:
+        st.session_state.turns = []
+    if "selected_turn_index" not in st.session_state:
+        st.session_state.selected_turn_index = None
 
 
 def main() -> None:
     setup_logging()
     st.set_page_config(page_title=APP_TITLE, page_icon="🚗", layout="wide")
     _inject_styles()
+    _ensure_session_state()
 
     st.title(APP_TITLE)
     st.caption(
@@ -80,25 +92,88 @@ def main() -> None:
         "sales, checkout, and trade-in data."
     )
 
-    if "_prefill" in st.session_state:
-        st.session_state.question_text = st.session_state.pop("_prefill")
-    if "question_text" not in st.session_state:
-        st.session_state.question_text = ""
-    if "analysis" not in st.session_state:
-        st.session_state.analysis = None
+    _render_sidebar()
+    _render_conversation()
 
-    st.subheader("Ask a question")
-    with st.form("analyze_form", clear_on_submit=False):
-        st.text_area(
-            "Natural-language question",
-            key="question_text",
-            height=90,
-            placeholder="Example: Which are the top 10 selling car models in Pune in 2026?",
-            label_visibility="collapsed",
+    pending = st.session_state.pop("_pending_question", None)
+    chat_question = st.chat_input("Ask about sales, inventory, checkout, or trade-ins…")
+    question = (pending or chat_question or "").strip()
+
+    if not question:
+        return
+
+    # New questions always return to the full conversation view.
+    st.session_state.selected_turn_index = None
+
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    try:
+        with st.chat_message("assistant"):
+            result = _stream_analysis(question)
+        turn = _turn_from_result(question, result)
+    except Exception:
+        logger.exception("ui_analysis_failed")
+        turn = _failed_turn(question, GENERIC_FAILURE)
+        with st.chat_message("assistant"):
+            st.warning(GENERIC_FAILURE)
+
+    st.session_state.turns.append(turn)
+    st.rerun()
+
+
+def _render_conversation() -> None:
+    turns = st.session_state.turns
+    selected = st.session_state.selected_turn_index
+
+    if selected is not None and 0 <= selected < len(turns):
+        st.caption(f"Viewing question {selected + 1} of {len(turns)}")
+        st.button(
+            "← Show all messages",
+            key="show_all_turns",
+            on_click=_show_all_turns,
         )
-        submitted = st.form_submit_button("Analyze", type="primary")
+        _render_turn(turns[selected], turn_index=selected)
+        return
 
+    for index, turn in enumerate(turns):
+        _render_turn(turn, turn_index=index)
+
+
+def _render_sidebar() -> None:
     with st.sidebar:
+        st.markdown("### 💬 Conversation History")
+        turns = st.session_state.turns
+        selected = st.session_state.selected_turn_index
+        if not turns:
+            st.caption("No questions yet.")
+        else:
+            for index, turn in enumerate(turns):
+                question = (turn.get("question") or "").strip()
+                label = question if len(question) <= 64 else f"{question[:61]}…"
+                stamp = turn.get("timestamp") or ""
+                prefix = f"{index + 1}."
+                button_label = f"{prefix} {label}"
+                if stamp:
+                    button_label = f"{button_label} · {stamp}"
+                is_active = selected == index
+                st.button(
+                    button_label,
+                    key=f"history_turn_{index}",
+                    on_click=_select_turn,
+                    args=(index,),
+                    type="primary" if is_active else "secondary",
+                    use_container_width=True,
+                )
+
+        st.button(
+            "🗑️ Clear Chat",
+            key="clear_chat",
+            on_click=_clear_chat,
+            use_container_width=True,
+        )
+
+        st.markdown("---")
         st.markdown("**Example questions**")
         for index, example in enumerate(EXAMPLE_QUESTIONS):
             st.button(
@@ -109,30 +184,53 @@ def main() -> None:
                 use_container_width=True,
             )
 
-    if submitted:
-        question = (st.session_state.question_text or "").strip()
-        if not question:
-            st.warning("Please enter a question to analyze.")
-        else:
-            try:
-                st.session_state.analysis = _stream_analysis(question)
-            except Exception:
-                logger.exception("ui_analysis_failed")
-                st.session_state.analysis = {
-                    "in_scope": True,
-                    "validation_result": False,
-                    "sql": "",
-                    "final_answer": GENERIC_FAILURE,
-                    "query_result": None,
-                    "chart": None,
-                    "chart_type": None,
-                    "business_insights": [],
-                    "validation_error": GENERIC_FAILURE,
-                    "_display_error": GENERIC_FAILURE,
-                }
 
-    elif st.session_state.analysis is not None:
-        _render_result(st.session_state.analysis)
+def _render_turn(turn: dict, *, turn_index: int) -> None:
+    with st.chat_message("user"):
+        st.markdown(turn.get("question") or "")
+
+    with st.chat_message("assistant"):
+        error = (turn.get("error") or "").strip()
+        if error:
+            st.warning(error)
+
+        answer = (turn.get("answer") or "").strip()
+        if answer:
+            st.subheader("Answer")
+            st.markdown(answer)
+
+        insights = turn.get("insights")
+        if insights:
+            st.subheader("Business Insight")
+            for item in insights:
+                st.markdown(f"- {item}")
+
+        frame = turn.get("table")
+        if frame is not None:
+            st.subheader("Data table")
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                st.dataframe(frame, use_container_width=True, hide_index=True)
+            elif isinstance(frame, pd.DataFrame) and frame.empty:
+                st.write(EMPTY_RESULT)
+            else:
+                st.write("No table to display for this result.")
+
+        chart = turn.get("chart")
+        if chart is not None:
+            st.subheader("Chart")
+            st.plotly_chart(
+                chart,
+                use_container_width=True,
+                key=f"history_chart_{turn_index}",
+            )
+        elif isinstance(frame, pd.DataFrame) and not frame.empty:
+            st.subheader("Chart")
+            st.info(_NO_CHART)
+
+        sql = (turn.get("sql") or "").strip()
+        if sql:
+            with st.expander("SQL Query", expanded=False):
+                st.code(sql, language="sql")
 
 
 def _stream_analysis(question: str) -> dict:
@@ -247,7 +345,11 @@ def _reveal_ready_sections(
         with chart_box.container():
             st.subheader("Chart")
             if result.get("chart") is not None:
-                st.plotly_chart(result["chart"], use_container_width=True)
+                st.plotly_chart(
+                    result["chart"],
+                    use_container_width=True,
+                    key=f"live_chart_{id(result)}",
+                )
             else:
                 st.info(_NO_CHART)
         shown["chart"] = True
@@ -265,59 +367,55 @@ def _reveal_ready_sections(
         shown["sql"] = True
 
 
-def _render_result(result: dict) -> None:
+def _turn_from_result(question: str, result: dict) -> dict:
     status = _status_from_result(result)
     banner = result.get("_display_error") or _banner_for_status(status)
-    if banner:
-        if status in {"out_of_scope", "no_data", "no_chart_only"}:
-            st.info(banner)
-        else:
-            st.warning(banner)
+    error = None
+    if status in {
+        "out_of_scope",
+        "sql_generation_failed",
+        "sql_validation_failed",
+        "execution_failed",
+    }:
+        error = banner or GENERIC_FAILURE
+    elif (result.get("_display_error") or "").strip():
+        error = result["_display_error"]
 
-    st.markdown("---")
-    st.subheader("Answer")
-    answer = (result.get("final_answer") or "").strip()
-    if answer:
-        st.write(answer)
-    elif status == "out_of_scope":
-        st.write(OUT_OF_SCOPE)
-    else:
-        st.write("No answer is available for this question.")
-
-    st.subheader("Business Insight")
-    insights = result.get("business_insights") or []
-    if status in {"out_of_scope", "sql_generation_failed", "sql_validation_failed", "execution_failed"}:
-        st.write("No business insight is available because the analysis did not complete.")
-    elif not insights:
-        st.write("The data does not support a meaningful insight.")
-    else:
-        for item in insights:
-            st.markdown(f"- {item}")
-
-    st.subheader("Data table")
-    frame = result.get("query_result")
-    if isinstance(frame, pd.DataFrame) and not frame.empty:
-        st.dataframe(frame, use_container_width=True, hide_index=True)
-    elif status == "no_data":
-        st.write(EMPTY_RESULT)
-    else:
-        st.write("No table to display for this result.")
-
-    st.subheader("Chart")
-    chart = result.get("chart")
-    if chart is not None:
-        st.plotly_chart(chart, use_container_width=True)
-    elif isinstance(frame, pd.DataFrame) and not frame.empty:
-        st.info(_NO_CHART)
-    else:
-        st.write("No chart to display for this result.")
+    answer = (result.get("final_answer") or "").strip() or None
+    insights = result.get("business_insights")
+    if not insights:
+        insights = None
 
     sql = (result.get("sql") or "").strip()
-    with st.expander("SQL Query", expanded=False):
-        if sql:
-            st.code(sql, language="sql")
-        else:
-            st.write("No SQL query was produced for this question.")
+    if not sql or result.get("validation_result") is not True:
+        sql = None
+
+    table = result.get("query_result") if "query_result" in result else None
+    chart = result.get("chart") if result.get("chart") is not None else None
+
+    return {
+        "question": question,
+        "answer": answer,
+        "table": table,
+        "chart": chart,
+        "insights": insights,
+        "sql": sql,
+        "error": error,
+        "timestamp": datetime.now().strftime("%H:%M"),
+    }
+
+
+def _failed_turn(question: str, message: str) -> dict:
+    return {
+        "question": question,
+        "answer": None,
+        "table": None,
+        "chart": None,
+        "insights": None,
+        "sql": None,
+        "error": message,
+        "timestamp": datetime.now().strftime("%H:%M"),
+    }
 
 
 def _status_from_result(result: dict) -> str:
