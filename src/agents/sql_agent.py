@@ -6,6 +6,8 @@ Does not execute SQL. Callers may pass the result to validate_sql / execute_sql.
 from __future__ import annotations
 
 import re
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -18,10 +20,13 @@ from src.db.sql_guard import (
     referenced_qualified_columns,
     referenced_tables,
 )
+from src.observability.context import FAILED, SUCCESS
+from src.observability.logger import observe_sql_generation
 from src.prompts.sql_prompt import (
     AUTOMOTIVE_SCOPE_PROMPT,
     SQL_HUMAN_PROMPT,
     SQL_SYSTEM_PROMPT,
+    format_chat_history_block,
     format_correction_block,
     format_schema_for_prompt,
 )
@@ -67,11 +72,13 @@ def generate_sql(
     database_schema: dict[str, Any],
     previous_sql: str = "",
     validation_error: str = "",
+    chat_history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Generate SQLite SQL for ``user_question`` using only ``database_schema``.
 
     Optional ``previous_sql`` and ``validation_error`` are included so retries
-    can correct a failed query. Does not run the query against the database.
+    can correct a failed query. Optional ``chat_history`` resolves follow-ups.
+    Does not run the query against the database.
     """
     question = (user_question or "").strip()
     if not question:
@@ -92,37 +99,70 @@ def generate_sql(
         ]
     )
     chain = prompt | llm.with_structured_output(SQLGeneration)
-    result = chain.invoke(
-        {
-            "user_question": question,
-            "database_schema": format_schema_for_prompt(database_schema),
-            "correction_block": format_correction_block(
-                previous_sql, validation_error
-            ),
-        }
-    )
-    if not isinstance(result, SQLGeneration):
-        result = SQLGeneration.model_validate(result)
-    return _generation_payload(
+    perf_start = time.perf_counter()
+    start_time = datetime.now(timezone.utc)
+    try:
+        result = chain.invoke(
+            {
+                "user_question": question,
+                "database_schema": format_schema_for_prompt(database_schema),
+                "chat_history_block": format_chat_history_block(chat_history),
+                "correction_block": format_correction_block(
+                    previous_sql, validation_error
+                ),
+            }
+        )
+        if not isinstance(result, SQLGeneration):
+            result = SQLGeneration.model_validate(result)
+    except Exception as exc:
+        observe_sql_generation(
+            status=FAILED,
+            perf_start=perf_start,
+            start_time=start_time,
+            error=exc,
+        )
+        raise
+    perf_end = time.perf_counter()
+    payload = _generation_payload(
         _finalize_generation(result, database_schema),
         in_scope=True,
     )
+    observe_sql_generation(
+        status=SUCCESS,
+        perf_start=perf_start,
+        perf_end=perf_end,
+        start_time=start_time,
+        generated_sql=payload.get("sql") or "",
+    )
+    return payload
 
 
-def classify_automotive_scope(user_question: str) -> AutomotiveScope:
+def classify_automotive_scope(
+    user_question: str,
+    chat_history: list[dict[str, str]] | None = None,
+) -> AutomotiveScope:
     """Decide if the question is about automotive dealership analytics.
 
-    Uses the meaning of the question, not a keyword denylist.
+    Uses the meaning of the question (and optional recent chat history for
+    follow-ups), not a keyword denylist.
     """
     llm = get_chat_llm()
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", AUTOMOTIVE_SCOPE_PROMPT),
-            ("human", "Question:\n{user_question}"),
+            (
+                "human",
+                "{chat_history_block}Current question:\n{user_question}",
+            ),
         ]
     )
     chain = prompt | llm.with_structured_output(AutomotiveScope)
-    result = chain.invoke({"user_question": user_question})
+    result = chain.invoke(
+        {
+            "user_question": user_question,
+            "chat_history_block": format_chat_history_block(chat_history),
+        }
+    )
     if not isinstance(result, AutomotiveScope):
         result = AutomotiveScope.model_validate(result)
     return result

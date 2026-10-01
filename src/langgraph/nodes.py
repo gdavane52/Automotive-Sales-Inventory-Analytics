@@ -24,6 +24,8 @@ from src.db.service import execute_sql as execute_sql_query
 from src.db.service import get_database_schema
 from src.db.service import validate_sql as validate_sql_query
 from src.langgraph.state import AnalyticsState
+from src.observability.context import BLOCKED
+from src.observability.logger import observe_sql_execution
 from src.prompts.sql_prompt import format_schema_for_prompt
 
 
@@ -41,7 +43,10 @@ def validate_question(state: AnalyticsState) -> dict[str, Any]:
             "final_answer": "A user question is required.",
         }
     try:
-        scope = classify_automotive_scope(question)
+        scope = classify_automotive_scope(
+            question,
+            chat_history=state.get("chat_history") or [],
+        )
     except Exception as exc:
         logger.exception("question_validation_llm_failed")
         return {
@@ -75,6 +80,7 @@ def generate_sql(state: AnalyticsState) -> dict[str, Any]:
             schema,
             previous_sql=previous_sql,
             validation_error=validation_error,
+            chat_history=state.get("chat_history") or [],
         )
     except Exception as exc:
         logger.exception("sql_generation_failed attempt=%s", attempt)
@@ -138,6 +144,10 @@ def validate_sql(state: AnalyticsState) -> dict[str, Any]:
 def execute_sql(state: AnalyticsState) -> dict[str, Any]:
     """Run validated SQL on SQLite and store a DataFrame. Skips if invalid."""
     if not state.get("validation_result"):
+        observe_sql_execution(
+            status=BLOCKED,
+            reason=(state.get("validation_error") or "").strip() or "SQL validation failed",
+        )
         return {}
     sql = (state.get("sql") or "").strip()
     try:
@@ -211,4 +221,8 @@ def validation_failed(state: AnalyticsState) -> dict[str, Any]:
     """Stop after the retry limit with a clear error. Does not execute SQL."""
     attempts = int(state.get("retry_count") or 0)
     logger.warning("sql_retry_limit_reached attempts=%s", attempts)
+    observe_sql_execution(
+        status=BLOCKED,
+        reason=(state.get("validation_error") or "").strip() or "SQL validation failed",
+    )
     return {"final_answer": RETRY_LIMIT, "validation_result": False}

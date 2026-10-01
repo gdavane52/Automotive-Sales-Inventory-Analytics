@@ -18,3 +18,15 @@ SQL_MAX_RESULT_ROWS = int(os.environ.get("SQL_MAX_RESULT_ROWS", "500"))
 LANGGRAPH_RECURSION_LIMIT = int(os.environ.get("LANGGRAPH_RECURSION_LIMIT", "16"))
 MAX_SQL_GENERATION_ATTEMPTS = int(os.environ.get("MAX_SQL_GENERATION_ATTEMPTS", "3"))
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+
+def observability_log_question() -> bool:
+    """Include the user question in request logs only when explicitly enabled."""
+    raw = (os.environ.get("OBSERVABILITY_LOG_QUESTION") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def observability_log_sql() -> bool:
+    """Include generated SQL in SQL-generation logs only when explicitly enabled."""
+    raw = (os.environ.get("OBSERVABILITY_LOG_SQL") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}

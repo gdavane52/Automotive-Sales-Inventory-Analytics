@@ -9,6 +9,8 @@ class AnalyticsState(TypedDict, total=False):
     """Graph state passed between SQL generation, validation, and execution."""
 
     user_question: str
+    # Prior turns from the Streamlit session: {"question", "answer"} dicts.
+    chat_history: list[dict[str, str]]
     in_scope: bool
     schema: str
 
@@ -29,3 +31,8 @@ class AnalyticsState(TypedDict, total=False):
     business_insights: list[str]
 
     retry_count: int
+
+    # Observability identifiers. request_id is one invocation; thread_id is
+    # the Streamlit conversation and is never generated inside the graph.
+    request_id: str
+    thread_id: str

@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 from src.agents.sql_agent import SQLGeneration, _finalize_generation
 from src.db.schema import DDL
 from src.db.service import get_database_schema
-from src.prompts.sql_prompt import format_schema_for_prompt
+from src.prompts.sql_prompt import format_chat_history_block, format_schema_for_prompt
 
 
 def _schema() -> dict:
@@ -32,6 +32,23 @@ class SqlPromptTests(unittest.TestCase):
         self.assertIn("vehicle_id", text)
         self.assertIn("sales.vehicle_id -> vehicle_stock.vehicle_id", text)
         self.assertNotIn("trips", text)
+
+    def test_chat_history_block_includes_prior_turns(self) -> None:
+        block = format_chat_history_block(
+            [
+                {
+                    "question": "What is the top selling city?",
+                    "answer": "Pune leads with 120 sales.",
+                }
+            ]
+        )
+        self.assertIn("Recent conversation", block)
+        self.assertIn("top selling city", block)
+        self.assertIn("Pune leads", block)
+
+    def test_chat_history_block_empty_when_missing(self) -> None:
+        self.assertEqual(format_chat_history_block(None), "")
+        self.assertEqual(format_chat_history_block([]), "")
 
 
 class SqlAgentFinalizeTests(unittest.TestCase):
@@ -130,12 +147,43 @@ class AutomotiveScopeTests(unittest.TestCase):
                 {
                     "user_question": (
                         "Which are the top 10 selling car models in Pune in 2026?"
-                    )
+                    ),
+                    "chat_history": [
+                        {
+                            "question": "What is the top selling city?",
+                            "answer": "Pune.",
+                        }
+                    ],
                 }
             )
 
         self.assertTrue(result["in_scope"])
         self.assertNotIn("final_answer", result)
+
+
+class ChatHistoryPassThroughTests(unittest.TestCase):
+    def test_validate_question_forwards_chat_history(self) -> None:
+        from unittest.mock import patch
+
+        from src.agents.sql_agent import AutomotiveScope
+        from src.langgraph.nodes import validate_question
+
+        history = [{"question": "Top selling city?", "answer": "Pune"}]
+        with patch(
+            "src.langgraph.nodes.classify_automotive_scope",
+            return_value=AutomotiveScope(in_scope=True, reason=""),
+        ) as classify:
+            validate_question(
+                {
+                    "user_question": "give me top 5 cities",
+                    "chat_history": history,
+                }
+            )
+
+        classify.assert_called_once_with(
+            "give me top 5 cities",
+            chat_history=history,
+        )
 
 
 if __name__ == "__main__":

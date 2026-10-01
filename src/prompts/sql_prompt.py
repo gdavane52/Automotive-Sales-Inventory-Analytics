@@ -10,8 +10,9 @@ from typing import Any
 SQL_SYSTEM_PROMPT = """You are a SQLite SQL generator for an automotive analytics database.
 
 You receive:
-1. The user's question
-2. The exact database schema (tables, columns, types, keys, relationships)
+1. The user's current question (may be a short follow-up)
+2. Optional recent conversation history — use it to resolve follow-ups
+3. The exact database schema (tables, columns, types, keys, relationships)
 
 You must generate SQL using ONLY that schema. Do not use any table or column
 that is not listed. Do not invent tables, columns, aliases of unknown objects,
@@ -134,16 +135,46 @@ Set in_scope=true only when the user's intent is about that automotive domain.
 Set in_scope=false when they are asking about a different industry or product category.
 Words such as model, sales, city, or year do not make a question automotive by themselves.
 
-Judge the meaning of the question. Do not use a banned-word list.
+If recent conversation history is provided, use it to interpret short follow-ups.
+Examples that should stay in_scope when prior turns were automotive analytics:
+"top 5", "give me top 5 cities", "break it down by model", "compare with 2025",
+"show monthly trend", "same for Mumbai".
+Do not reject a follow-up as vague when the prior conversation already established
+the automotive analytics topic.
+
+Judge the meaning of the question (with history when present). Do not use a banned-word list.
 If in_scope is false, explain briefly that only automotive analytics questions can be answered.
 """
 
-SQL_HUMAN_PROMPT = """User question:
+SQL_HUMAN_PROMPT = """{chat_history_block}Current user question:
 {user_question}
 
 Database schema:
 {database_schema}
 {correction_block}"""
+
+
+def format_chat_history_block(
+    chat_history: list[dict[str, str]] | None = None,
+) -> str:
+    """Render prior Q&A turns so follow-ups can be resolved in context."""
+    if not chat_history:
+        return ""
+    lines = [
+        "Recent conversation (resolve follow-ups using this context):",
+    ]
+    for index, turn in enumerate(chat_history, start=1):
+        question = (turn.get("question") or "").strip()
+        answer = (turn.get("answer") or "").strip()
+        if not question:
+            continue
+        lines.append(f"{index}. User: {question}")
+        if answer:
+            lines.append(f"   Assistant: {answer}")
+    if len(lines) == 1:
+        return ""
+    lines.append("")
+    return "\n".join(lines)
 
 
 def format_correction_block(previous_sql: str = "", validation_error: str = "") -> str:

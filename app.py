@@ -40,6 +40,8 @@ _SQL_GENERATION_FAILED = (
     "Please rephrase it and try again."
 )
 _NO_CHART = "A chart could not be generated from this result."
+_MAX_HISTORY_TURNS = 5
+_MAX_HISTORY_ANSWER_CHARS = 300
 logger = get_logger("ui")
 
 # Shown after a node finishes, while the next step is running.
@@ -57,18 +59,65 @@ def _use_example(question: str) -> None:
     st.session_state["_pending_question"] = question
 
 
-def _clear_chat() -> None:
-    st.session_state.turns = []
+def _chat_title(turns: list[dict]) -> str:
+    for turn in turns:
+        question = (turn.get("question") or "").strip()
+        if question:
+            return question
+    return "Conversation"
+
+
+def _remember_current_chat() -> None:
+    """Keep one history entry per conversation, not per question."""
+    turns = st.session_state.turns
+    if not turns:
+        return
+    thread_id = st.session_state.thread_id
+    title = _chat_title(turns)
+    updated = (turns[-1].get("timestamp") or "").strip() or datetime.now().strftime("%H:%M")
+    chats: list[dict] = st.session_state.chats
+    for index, chat in enumerate(chats):
+        if chat.get("thread_id") == thread_id:
+            chat["title"] = title
+            chat["updated"] = updated
+            chat["turns"] = turns
+            if index:
+                chats.insert(0, chats.pop(index))
+            return
+    chats.insert(
+        0,
+        {
+            "thread_id": thread_id,
+            "title": title,
+            "updated": updated,
+            "turns": turns,
+        },
+    )
+
+
+def _new_chat() -> None:
+    _remember_current_chat()
     st.session_state.thread_id = str(uuid.uuid4())
-    st.session_state.selected_turn_index = None
+    st.session_state.turns = []
 
 
-def _select_turn(index: int) -> None:
-    st.session_state.selected_turn_index = index
+def _open_chat(thread_id: str) -> None:
+    _remember_current_chat()
+    for chat in st.session_state.chats:
+        if chat.get("thread_id") != thread_id:
+            continue
+        st.session_state.thread_id = thread_id
+        st.session_state.turns = chat.get("turns") or []
+        return
 
 
-def _show_all_turns() -> None:
-    st.session_state.selected_turn_index = None
+def _clear_chat() -> None:
+    thread_id = st.session_state.thread_id
+    st.session_state.chats = [
+        chat for chat in st.session_state.chats if chat.get("thread_id") != thread_id
+    ]
+    st.session_state.thread_id = str(uuid.uuid4())
+    st.session_state.turns = []
 
 
 def _ensure_session_state() -> None:
@@ -76,8 +125,9 @@ def _ensure_session_state() -> None:
         st.session_state.thread_id = str(uuid.uuid4())
     if "turns" not in st.session_state:
         st.session_state.turns = []
-    if "selected_turn_index" not in st.session_state:
-        st.session_state.selected_turn_index = None
+    if "chats" not in st.session_state:
+        st.session_state.chats = []
+    _remember_current_chat()
 
 
 def main() -> None:
@@ -102,15 +152,16 @@ def main() -> None:
     if not question:
         return
 
-    # New questions always return to the full conversation view.
-    st.session_state.selected_turn_index = None
-
     with st.chat_message("user"):
         st.markdown(question)
 
     try:
         with st.chat_message("assistant"):
-            result = _stream_analysis(question)
+            result = _stream_analysis(
+                question,
+                chat_history=_chat_history_for_graph(st.session_state.turns),
+                thread_id=st.session_state.thread_id,
+            )
         turn = _turn_from_result(question, result)
     except Exception:
         logger.exception("ui_analysis_failed")
@@ -119,50 +170,46 @@ def main() -> None:
             st.warning(GENERIC_FAILURE)
 
     st.session_state.turns.append(turn)
+    _remember_current_chat()
     st.rerun()
 
 
 def _render_conversation() -> None:
-    turns = st.session_state.turns
-    selected = st.session_state.selected_turn_index
-
-    if selected is not None and 0 <= selected < len(turns):
-        st.caption(f"Viewing question {selected + 1} of {len(turns)}")
-        st.button(
-            "← Show all messages",
-            key="show_all_turns",
-            on_click=_show_all_turns,
-        )
-        _render_turn(turns[selected], turn_index=selected)
-        return
-
-    for index, turn in enumerate(turns):
+    for index, turn in enumerate(st.session_state.turns):
         _render_turn(turn, turn_index=index)
 
 
 def _render_sidebar() -> None:
     with st.sidebar:
+        st.button(
+            "➕ New Chat",
+            key="new_chat",
+            on_click=_new_chat,
+            use_container_width=True,
+            type="primary",
+        )
         st.markdown("### 💬 Conversation History")
-        turns = st.session_state.turns
-        selected = st.session_state.selected_turn_index
-        if not turns:
-            st.caption("No questions yet.")
+        chats = st.session_state.chats
+        active_id = st.session_state.thread_id
+        if not chats:
+            st.caption("No conversations yet.")
         else:
-            for index, turn in enumerate(turns):
-                question = (turn.get("question") or "").strip()
-                label = question if len(question) <= 64 else f"{question[:61]}…"
-                stamp = turn.get("timestamp") or ""
-                prefix = f"{index + 1}."
-                button_label = f"{prefix} {label}"
+            for chat in chats:
+                title = (chat.get("title") or "Conversation").strip()
+                label = title if len(title) <= 64 else f"{title[:61]}…"
+                count = len(chat.get("turns") or [])
+                stamp = chat.get("updated") or ""
+                button_label = label
+                if count > 1:
+                    button_label = f"{button_label} · {count}"
                 if stamp:
                     button_label = f"{button_label} · {stamp}"
-                is_active = selected == index
                 st.button(
                     button_label,
-                    key=f"history_turn_{index}",
-                    on_click=_select_turn,
-                    args=(index,),
-                    type="primary" if is_active else "secondary",
+                    key=f"history_chat_{chat.get('thread_id')}",
+                    on_click=_open_chat,
+                    args=(chat.get("thread_id"),),
+                    type="primary" if chat.get("thread_id") == active_id else "secondary",
                     use_container_width=True,
                 )
 
@@ -233,8 +280,32 @@ def _render_turn(turn: dict, *, turn_index: int) -> None:
                 st.code(sql, language="sql")
 
 
-def _stream_analysis(question: str) -> dict:
-    merged: dict = {"user_question": question, "retry_count": 0}
+def _chat_history_for_graph(turns: list[dict]) -> list[dict[str, str]]:
+    """Build compact prior Q&A for LangGraph follow-up context."""
+    history: list[dict[str, str]] = []
+    for turn in turns[-_MAX_HISTORY_TURNS:]:
+        question = (turn.get("question") or "").strip()
+        if not question:
+            continue
+        answer = (turn.get("answer") or "").strip()
+        if not answer:
+            answer = (turn.get("error") or "").strip()
+        if len(answer) > _MAX_HISTORY_ANSWER_CHARS:
+            answer = f"{answer[:_MAX_HISTORY_ANSWER_CHARS - 1]}…"
+        history.append({"question": question, "answer": answer})
+    return history
+
+
+def _stream_analysis(
+    question: str,
+    chat_history: list[dict[str, str]] | None = None,
+    thread_id: str | None = None,
+) -> dict:
+    merged: dict = {
+        "user_question": question,
+        "retry_count": 0,
+        "chat_history": list(chat_history or []),
+    }
     buffers = {"answer": "", "insight": ""}
     shown = {"table": False, "chart": False, "sql": False}
 
@@ -256,7 +327,11 @@ def _stream_analysis(question: str) -> dict:
 
     handler_token = set_token_handler(on_token)
     try:
-        for update in stream_analytics_question(question):
+        for update in stream_analytics_question(
+            question,
+            chat_history=chat_history,
+            thread_id=thread_id,
+        ):
             if not isinstance(update, dict):
                 continue
             for node_name, payload in update.items():

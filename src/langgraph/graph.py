@@ -29,6 +29,13 @@ from src.langgraph.nodes import (
 )
 from src.langgraph.routing import route_after_question, route_after_validation
 from src.langgraph.state import AnalyticsState
+from src.observability.context import (
+    FAILED,
+    begin_request,
+    classify_completed_request,
+    reset_request,
+)
+from src.observability.logger import complete_request, log_request_started
 
 _GRAPH: CompiledStateGraph | None = None
 _RECURSION_LIMIT = LANGGRAPH_RECURSION_LIMIT
@@ -95,47 +102,133 @@ def get_analytics_graph() -> CompiledStateGraph:
     return _GRAPH
 
 
-def run_analytics_question(user_question: str) -> dict[str, Any]:
-    """Run the compiled graph for one question and return the final state."""
+def run_analytics_question(
+    user_question: str,
+    chat_history: list[dict[str, str]] | None = None,
+    thread_id: str | None = None,
+) -> dict[str, Any]:
+    """Run the compiled graph for one question and return the final state.
+
+    Generates a new ``request_id``. ``thread_id`` is the caller's conversation
+    id and is left unchanged.
+    """
     setup_logging()
-    logger.info("analytics_run_start")
+    ctx = begin_request(thread_id=thread_id, user_question=user_question)
+    log_request_started(ctx)
+    logger.info(
+        "analytics_run_start request_id=%s thread_id=%s",
+        ctx.request_id,
+        ctx.thread_id or "",
+    )
     graph = get_analytics_graph()
     try:
         result = graph.invoke(
-            {"user_question": user_question, "retry_count": 0},
+            _graph_input(user_question, chat_history, ctx),
             {"recursion_limit": _RECURSION_LIMIT},
         )
+        status, error_type, error_message = classify_completed_request(result)
+        complete_request(ctx, status, error_type, error_message)
         logger.info(
-            "analytics_run_complete in_scope=%s valid_sql=%s",
+            "analytics_run_complete request_id=%s in_scope=%s valid_sql=%s status=%s",
+            ctx.request_id,
             result.get("in_scope"),
             result.get("validation_result"),
+            ctx.status,
         )
         return result
     except Exception as exc:
         logger.exception("analytics_run_failed")
-        return _failed_state(exc)
+        complete_request(
+            ctx,
+            FAILED,
+            error_type=type(exc).__name__,
+            error_message=public_error_message(exc),
+        )
+        return _failed_state(exc, ctx)
+    finally:
+        _close_request(ctx)
 
 
-def stream_analytics_question(user_question: str) -> Iterator[dict[str, Any]]:
-    """Yield LangGraph node updates as they complete. Does not generate SQL itself."""
+def stream_analytics_question(
+    user_question: str,
+    chat_history: list[dict[str, str]] | None = None,
+    thread_id: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield LangGraph node updates as they complete. Does not generate SQL itself.
+
+    Timing covers the full time the caller spends consuming this generator.
+    """
     setup_logging()
-    logger.info("analytics_stream_start")
+    ctx = begin_request(thread_id=thread_id, user_question=user_question)
+    log_request_started(ctx)
+    logger.info(
+        "analytics_stream_start request_id=%s thread_id=%s history_turns=%s",
+        ctx.request_id,
+        ctx.thread_id or "",
+        len(chat_history or []),
+    )
     graph = get_analytics_graph()
+    merged: dict[str, Any] = {}
     try:
-        yield from graph.stream(
-            {"user_question": user_question, "retry_count": 0},
+        for update in graph.stream(
+            _graph_input(user_question, chat_history, ctx),
             {"recursion_limit": _RECURSION_LIMIT},
             stream_mode="updates",
+        ):
+            if isinstance(update, dict):
+                for payload in update.values():
+                    if isinstance(payload, dict):
+                        merged.update(payload)
+            yield update
+        status, error_type, error_message = classify_completed_request(merged)
+        complete_request(ctx, status, error_type, error_message)
+        logger.info(
+            "analytics_stream_complete request_id=%s status=%s",
+            ctx.request_id,
+            ctx.status,
         )
-        logger.info("analytics_stream_complete")
     except Exception as exc:
         logger.exception("analytics_stream_failed")
-        yield {"validation_failed": _failed_state(exc)}
+        complete_request(
+            ctx,
+            FAILED,
+            error_type=type(exc).__name__,
+            error_message=public_error_message(exc),
+        )
+        yield {"validation_failed": _failed_state(exc, ctx)}
+    finally:
+        _close_request(ctx)
 
 
-def _failed_state(exc: BaseException) -> dict[str, Any]:
-    message = public_error_message(exc) or GENERIC_FAILURE
+def _graph_input(
+    user_question: str,
+    chat_history: list[dict[str, str]] | None,
+    ctx: Any,
+) -> dict[str, Any]:
     return {
+        "user_question": user_question,
+        "retry_count": 0,
+        "chat_history": list(chat_history or []),
+        "request_id": ctx.request_id,
+        "thread_id": ctx.thread_id or "",
+    }
+
+
+def _close_request(ctx: Any) -> None:
+    """Finish an abandoned stream, then drop the request context."""
+    if not ctx.finished:
+        complete_request(
+            ctx,
+            FAILED,
+            error_type="stream_interrupted",
+            error_message="The request stream ended before completion.",
+        )
+    reset_request(ctx)
+
+
+def _failed_state(exc: BaseException, ctx: Any | None = None) -> dict[str, Any]:
+    message = public_error_message(exc) or GENERIC_FAILURE
+    payload: dict[str, Any] = {
         "in_scope": False,
         "validation_result": False,
         "sql": "",
@@ -146,4 +239,8 @@ def _failed_state(exc: BaseException) -> dict[str, Any]:
         "business_insights": [],
         "validation_error": message,
     }
+    if ctx is not None:
+        payload["request_id"] = ctx.request_id
+        payload["thread_id"] = ctx.thread_id or ""
+    return payload
 

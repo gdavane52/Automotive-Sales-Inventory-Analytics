@@ -8,6 +8,8 @@ read-only SELECT via SQLAlchemy.
 from __future__ import annotations
 
 import sqlite3
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -213,33 +215,82 @@ def execute_sql(
     write or schema operations. The SQLite connection is opened read-only
     and aborted if the query exceeds ``timeout_seconds``.
     """
-    safe_sql = assert_readonly_select(query)
-    engine = create_readonly_engine(db_path)
+    from src.observability.context import BLOCKED, FAILED, SUCCESS
+    from src.observability.logger import observe_sql_execution
+
+    try:
+        safe_sql = assert_readonly_select(query)
+    except ReadOnlyQueryError as exc:
+        observe_sql_execution(status=BLOCKED, error=exc)
+        raise
+
+    try:
+        engine = create_readonly_engine(db_path)
+    except FileNotFoundError as exc:
+        observe_sql_execution(status=FAILED, error=exc)
+        raise
+
+    perf_start: float | None = None
+    perf_end: float | None = None
+    started_at: datetime | None = None
     try:
         with engine.connect() as connection:
             apply_query_timeout(connection, timeout_seconds)
+            perf_start = time.perf_counter()
+            started_at = datetime.now(timezone.utc)
             frame = pd.read_sql_query(text(safe_sql), connection)
-            return _limit_result_rows(frame)
+            perf_end = time.perf_counter()
+            limited = _limit_result_rows(frame)
+        observe_sql_execution(
+            status=SUCCESS,
+            perf_start=perf_start,
+            perf_end=perf_end,
+            start_time=started_at,
+            row_count=len(limited),
+        )
+        return limited
     except (SQLAlchemyError, pd.errors.DatabaseError) as exc:
+        if perf_start is not None and perf_end is None:
+            perf_end = time.perf_counter()
         if _is_timeout_error(exc):
             logger.warning("sql_timeout query=%s", safe_sql[:180])
-            raise SQLTimeoutError(
+            mapped: BaseException = SQLTimeoutError(
                 f"Query exceeded the timeout and was cancelled. Query: {safe_sql}"
-            ) from exc
-        logger.exception("sqlite_execution_failed")
-        raise SQLExecutionError(_friendly_sql_error(exc, safe_sql)) from exc
+            )
+        else:
+            logger.exception("sqlite_execution_failed")
+            mapped = SQLExecutionError(_friendly_sql_error(exc, safe_sql))
+        observe_sql_execution(
+            status=FAILED,
+            perf_start=perf_start,
+            perf_end=perf_end,
+            start_time=started_at,
+            error=mapped,
+        )
+        raise mapped from exc
     except Exception as exc:
         if isinstance(
             exc,
             (SQLExecutionError, FileNotFoundError, ReadOnlyQueryError, SQLTimeoutError),
         ):
             raise
+        if perf_start is not None and perf_end is None:
+            perf_end = time.perf_counter()
         if _is_timeout_error(exc):
-            raise SQLTimeoutError(
+            mapped = SQLTimeoutError(
                 f"Query exceeded the timeout and was cancelled. Query: {safe_sql}"
-            ) from exc
-        logger.exception("sqlite_execution_failed")
-        raise SQLExecutionError("Failed to execute SQL.") from exc
+            )
+        else:
+            logger.exception("sqlite_execution_failed")
+            mapped = SQLExecutionError("Failed to execute SQL.")
+        observe_sql_execution(
+            status=FAILED,
+            perf_start=perf_start,
+            perf_end=perf_end,
+            start_time=started_at,
+            error=mapped,
+        )
+        raise mapped from exc
     finally:
         engine.dispose()
 
