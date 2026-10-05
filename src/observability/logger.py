@@ -12,6 +12,7 @@ from src.config.settings import observability_log_question, observability_log_sq
 from src.observability.context import (
     BLOCKED,
     FAILED,
+    LlmCall,
     RequestContext,
     SqlExecutionAttempt,
     SqlGenerationAttempt,
@@ -26,6 +27,28 @@ _MAX_ERROR_CHARS = 500
 
 def log_request_started(ctx: RequestContext) -> None:
     logger.info("%s", _payload("REQUEST_STARTED", ctx))
+
+
+def log_rate_limit(
+    *,
+    allowed: bool,
+    thread_id: str | None,
+    question_count: int,
+    reason: str | None = None,
+    retry_after_seconds: int | None = None,
+) -> None:
+    """Log a session rate-limit decision. Does not start an analytics request."""
+    event = "RATE_LIMIT_ACCEPTED" if allowed else "RATE_LIMIT_BLOCKED"
+    body: dict[str, object] = {
+        "event": event,
+        "thread_id": thread_id or "",
+        "question_count": question_count,
+    }
+    if reason:
+        body["reason"] = reason
+    if retry_after_seconds is not None:
+        body["retry_after_seconds"] = retry_after_seconds
+    logger.info("%s", redact_secrets(json.dumps(body, ensure_ascii=True)))
 
 
 def complete_request(
@@ -176,6 +199,73 @@ def _sql_execution_payload(event: str, attempt: SqlExecutionAttempt) -> str:
         body["error_message"] = attempt.error_message
     if attempt.reason:
         body["reason"] = attempt.reason
+    return redact_secrets(json.dumps(body, ensure_ascii=True))
+
+
+def observe_llm_call(
+    *,
+    call_id: str,
+    component: str,
+    model: str | None,
+    perf_start: float,
+    start_time: datetime,
+    perf_end: float | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    total_tokens: int | None = None,
+    token_usage_available: bool = False,
+    status: str = "SUCCESS",
+    error: BaseException | None = None,
+) -> None:
+    """Append one generic LLM observation. No-op without an active request.
+
+    Does not log prompts or model responses. Missing token counts stay None.
+    """
+    ctx = current_request()
+    if ctx is None:
+        return
+    stopped = time.perf_counter() if perf_end is None else perf_end
+    call = LlmCall(
+        call_id=call_id,
+        request_id=ctx.request_id,
+        thread_id=ctx.thread_id,
+        component=component,
+        model=model,
+        start_time=start_time,
+        end_time=datetime.now(timezone.utc),
+        llm_latency_ms=max(0.0, (stopped - perf_start) * 1000.0),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        token_usage_available=token_usage_available,
+        status=status,
+        error_type=type(error).__name__ if error is not None else None,
+        error_message=_safe_error_message(public_error_message(error)) if error else None,
+    )
+    ctx.llm_calls.append(call)
+    event = "LLM_FAILED" if status == FAILED else "LLM_COMPLETED"
+    logger.info("%s", _llm_payload(event, call))
+
+
+def _llm_payload(event: str, call: LlmCall) -> str:
+    body: dict[str, object] = {
+        "event": event,
+        "request_id": call.request_id,
+        "thread_id": call.thread_id,
+        "call_id": call.call_id,
+        "component": call.component,
+        "model": call.model,
+        "llm_latency_ms": int(round(call.llm_latency_ms)),
+        "input_tokens": call.input_tokens,
+        "output_tokens": call.output_tokens,
+        "total_tokens": call.total_tokens,
+        "token_usage_available": call.token_usage_available,
+        "status": call.status,
+    }
+    if call.error_type:
+        body["error_type"] = call.error_type
+    if call.error_message:
+        body["error_message"] = call.error_message
     return redact_secrets(json.dumps(body, ensure_ascii=True))
 
 

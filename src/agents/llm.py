@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
 from src.config.settings import OPENAI_MODEL, PROJECT_ROOT
+from src.observability.llm import LlmObservabilityHandler
 
 
 def get_chat_llm(*, streaming: bool = False) -> ChatOpenAI:
@@ -24,6 +25,7 @@ def get_chat_llm(*, streaming: bool = False) -> ChatOpenAI:
         temperature=0,
         api_key=api_key,
         streaming=streaming,
+        callbacks=[LlmObservabilityHandler()],
     )
 
 

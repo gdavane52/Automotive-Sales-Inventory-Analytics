@@ -86,6 +86,60 @@ class SqlExecutionAttempt:
 
 
 @dataclass
+class LlmCall:
+    """One underlying model invocation, separate from SQL task metrics.
+
+    ``SUCCESS`` means the model call itself finished. A later domain rejection
+    or SQL validation failure does not change this status.
+
+    Token fields stay None when the provider does not report them. They are
+    never estimated and never stored as zero in place of a missing value.
+    ``token_usage_available`` is True only when a usage payload was present,
+    even if one of the counts inside it was omitted.
+    """
+
+    call_id: str
+    request_id: str
+    thread_id: str | None
+    component: str
+    model: str | None
+    start_time: datetime
+    end_time: datetime
+    llm_latency_ms: float
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    token_usage_available: bool
+    status: str
+    error_type: str | None = None
+    error_message: str | None = None
+
+    def __repr__(self) -> str:
+        return (
+            "LlmCall("
+            f"call_id={self.call_id!r}, "
+            f"request_id={self.request_id!r}, "
+            f"thread_id={self.thread_id!r}, "
+            f"component={self.component!r}, "
+            f"model={self.model!r}, "
+            f"status={self.status!r}, "
+            f"llm_latency_ms={self.llm_latency_ms!r})"
+        )
+
+
+def _sum_present(calls: list[LlmCall], field_name: str) -> float | int | None:
+    if not calls:
+        return None
+    values: list[float | int] = []
+    for call in calls:
+        value = getattr(call, field_name)
+        if value is None:
+            return None
+        values.append(value)
+    return sum(values)
+
+
+@dataclass
 class RequestContext:
     """One analytics invocation. ``request_id`` is unique per call.
 
@@ -107,6 +161,31 @@ class RequestContext:
     reset_token: Token[RequestContext | None] | None = None
     sql_generation_attempts: list[SqlGenerationAttempt] = field(default_factory=list)
     sql_execution_attempts: list[SqlExecutionAttempt] = field(default_factory=list)
+    llm_calls: list[LlmCall] = field(default_factory=list)
+
+    @property
+    def total_llm_latency_ms(self) -> float | None:
+        """Sum of per-call latencies. None when no call was timed.
+
+        A missing latency is not treated as zero. If any call lacks a latency,
+        the exact total is unknown and this returns None.
+        """
+        return _sum_present(self.llm_calls, "llm_latency_ms")
+
+    @property
+    def total_input_tokens(self) -> int | None:
+        """Sum of input tokens, or None if any call did not report that count."""
+        return _sum_present(self.llm_calls, "input_tokens")
+
+    @property
+    def total_output_tokens(self) -> int | None:
+        """Sum of output tokens, or None if any call did not report that count."""
+        return _sum_present(self.llm_calls, "output_tokens")
+
+    @property
+    def total_tokens(self) -> int | None:
+        """Sum of total tokens, or None if any call did not report that count."""
+        return _sum_present(self.llm_calls, "total_tokens")
 
     def __repr__(self) -> str:
         return (

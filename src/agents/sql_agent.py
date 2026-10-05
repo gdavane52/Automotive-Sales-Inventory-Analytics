@@ -21,6 +21,7 @@ from src.db.sql_guard import (
     referenced_tables,
 )
 from src.observability.context import FAILED, SUCCESS
+from src.observability.llm import llm_component
 from src.observability.logger import observe_sql_generation
 from src.prompts.sql_prompt import (
     AUTOMOTIVE_SCOPE_PROMPT,
@@ -102,16 +103,17 @@ def generate_sql(
     perf_start = time.perf_counter()
     start_time = datetime.now(timezone.utc)
     try:
-        result = chain.invoke(
-            {
-                "user_question": question,
-                "database_schema": format_schema_for_prompt(database_schema),
-                "chat_history_block": format_chat_history_block(chat_history),
-                "correction_block": format_correction_block(
-                    previous_sql, validation_error
-                ),
-            }
-        )
+        with llm_component("generate_sql"):
+            result = chain.invoke(
+                {
+                    "user_question": question,
+                    "database_schema": format_schema_for_prompt(database_schema),
+                    "chat_history_block": format_chat_history_block(chat_history),
+                    "correction_block": format_correction_block(
+                        previous_sql, validation_error
+                    ),
+                }
+            )
         if not isinstance(result, SQLGeneration):
             result = SQLGeneration.model_validate(result)
     except Exception as exc:
@@ -157,12 +159,13 @@ def classify_automotive_scope(
         ]
     )
     chain = prompt | llm.with_structured_output(AutomotiveScope)
-    result = chain.invoke(
-        {
-            "user_question": user_question,
-            "chat_history_block": format_chat_history_block(chat_history),
-        }
-    )
+    with llm_component("classify_automotive_scope"):
+        result = chain.invoke(
+            {
+                "user_question": user_question,
+                "chat_history_block": format_chat_history_block(chat_history),
+            }
+        )
     if not isinstance(result, AutomotiveScope):
         result = AutomotiveScope.model_validate(result)
     return result

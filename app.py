@@ -6,6 +6,7 @@ Does not generate SQL, execute SQL, or open database connections.
 from __future__ import annotations
 
 import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,11 @@ if str(_ROOT) not in sys.path:
 
 from src.agents.stream_sink import reset_token_handler, set_token_handler
 from src.config.logging import get_logger, setup_logging
+from src.config.rate_limit import (
+    LAST_REQUEST_TIME_KEY,
+    QUESTION_COUNT_KEY,
+    guard_submission,
+)
 from src.config.safety import (
     EMPTY_RESULT,
     GENERIC_FAILURE,
@@ -127,6 +133,11 @@ def _ensure_session_state() -> None:
         st.session_state.turns = []
     if "chats" not in st.session_state:
         st.session_state.chats = []
+    # Session-level demo limits. Persist across reruns and chat switches.
+    if QUESTION_COUNT_KEY not in st.session_state:
+        st.session_state[QUESTION_COUNT_KEY] = 0
+    if LAST_REQUEST_TIME_KEY not in st.session_state:
+        st.session_state[LAST_REQUEST_TIME_KEY] = None
     _remember_current_chat()
 
 
@@ -155,23 +166,37 @@ def main() -> None:
     with st.chat_message("user"):
         st.markdown(question)
 
-    try:
-        with st.chat_message("assistant"):
-            result = _stream_analysis(
-                question,
-                chat_history=_chat_history_for_graph(st.session_state.turns),
-                thread_id=st.session_state.thread_id,
-            )
-        turn = _turn_from_result(question, result)
-    except Exception:
-        logger.exception("ui_analysis_failed")
-        turn = _failed_turn(question, GENERIC_FAILURE)
-        with st.chat_message("assistant"):
-            st.warning(GENERIC_FAILURE)
+    def _start_workflow() -> None:
+        try:
+            with st.chat_message("assistant"):
+                result = _stream_analysis(
+                    question,
+                    chat_history=_chat_history_for_graph(st.session_state.turns),
+                    thread_id=st.session_state.thread_id,
+                )
+            turn = _turn_from_result(question, result)
+        except Exception:
+            logger.exception("ui_analysis_failed")
+            turn = _failed_turn(question, GENERIC_FAILURE)
+            with st.chat_message("assistant"):
+                st.warning(GENERIC_FAILURE)
 
-    st.session_state.turns.append(turn)
-    _remember_current_chat()
-    st.rerun()
+        st.session_state.turns.append(turn)
+        _remember_current_chat()
+        st.rerun()
+
+    decision = guard_submission(
+        st.session_state,
+        question,
+        _start_workflow,
+        now=time.monotonic(),
+        thread_id=st.session_state.thread_id,
+    )
+    if decision.allowed:
+        return
+
+    with st.chat_message("assistant"):
+        st.warning(decision.user_message() or GENERIC_FAILURE)
 
 
 def _render_conversation() -> None:
@@ -185,7 +210,7 @@ def _render_sidebar() -> None:
             "➕ New Chat",
             key="new_chat",
             on_click=_new_chat,
-            use_container_width=True,
+            width="stretch",
             type="primary",
         )
         st.markdown("### 💬 Conversation History")
@@ -210,14 +235,14 @@ def _render_sidebar() -> None:
                     on_click=_open_chat,
                     args=(chat.get("thread_id"),),
                     type="primary" if chat.get("thread_id") == active_id else "secondary",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
         st.button(
             "🗑️ Clear Chat",
             key="clear_chat",
             on_click=_clear_chat,
-            use_container_width=True,
+            width="stretch",
         )
 
         st.markdown("---")
@@ -228,7 +253,7 @@ def _render_sidebar() -> None:
                 key=f"example_{index}",
                 on_click=_use_example,
                 args=(example,),
-                use_container_width=True,
+                width="stretch",
             )
 
 
@@ -256,7 +281,7 @@ def _render_turn(turn: dict, *, turn_index: int) -> None:
         if frame is not None:
             st.subheader("Data table")
             if isinstance(frame, pd.DataFrame) and not frame.empty:
-                st.dataframe(frame, use_container_width=True, hide_index=True)
+                st.dataframe(frame, width="stretch", hide_index=True)
             elif isinstance(frame, pd.DataFrame) and frame.empty:
                 st.write(EMPTY_RESULT)
             else:
@@ -267,7 +292,7 @@ def _render_turn(turn: dict, *, turn_index: int) -> None:
             st.subheader("Chart")
             st.plotly_chart(
                 chart,
-                use_container_width=True,
+                width="stretch",
                 key=f"history_chart_{turn_index}",
             )
         elif isinstance(frame, pd.DataFrame) and not frame.empty:
@@ -409,7 +434,7 @@ def _reveal_ready_sections(
         with table_box.container():
             st.subheader("Data table")
             if isinstance(frame, pd.DataFrame) and not frame.empty:
-                st.dataframe(frame, use_container_width=True, hide_index=True)
+                st.dataframe(frame, width="stretch", hide_index=True)
             elif isinstance(frame, pd.DataFrame) and frame.empty:
                 st.write(EMPTY_RESULT)
             else:
@@ -422,7 +447,7 @@ def _reveal_ready_sections(
             if result.get("chart") is not None:
                 st.plotly_chart(
                     result["chart"],
-                    use_container_width=True,
+                    width="stretch",
                     key=f"live_chart_{id(result)}",
                 )
             else:

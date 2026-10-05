@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 from src.agents.answer_agent import _format_query_result
 from src.agents.llm import content_to_text, get_chat_llm
 from src.agents.stream_sink import emit_token
+from src.observability.llm import llm_component
 from src.prompts.insight_prompt import INSIGHT_HUMAN_PROMPT, INSIGHT_SYSTEM_PROMPT
 
 _NO_INSIGHT = (
@@ -68,12 +69,13 @@ def generate_business_insights(
         "query_result": table_text,
     }
     collected: list[str] = []
-    for chunk in chain.stream(payload):
-        token = content_to_text(chunk)
-        if not token:
-            continue
-        collected.append(token)
-        emit_token("insight", token)
+    with llm_component("generate_insight"):
+        for chunk in chain.stream(payload):
+            token = content_to_text(chunk)
+            if not token:
+                continue
+            collected.append(token)
+            emit_token("insight", token)
     return _insights_from_text("".join(collected))
 
 

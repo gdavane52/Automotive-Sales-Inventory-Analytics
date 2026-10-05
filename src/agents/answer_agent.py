@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from src.agents.llm import content_to_text, get_chat_llm
 from src.agents.stream_sink import emit_token
+from src.observability.llm import llm_component
 from src.prompts.answer_prompt import ANSWER_HUMAN_PROMPT, ANSWER_SYSTEM_PROMPT
 
 _MAX_RESULT_ROWS = 50
@@ -56,12 +57,13 @@ def generate_business_answer(
         "query_result": table_text,
     }
     collected: list[str] = []
-    for chunk in chain.stream(payload):
-        token = content_to_text(chunk)
-        if not token:
-            continue
-        collected.append(token)
-        emit_token("answer", token)
+    with llm_component("generate_answer"):
+        for chunk in chain.stream(payload):
+            token = content_to_text(chunk)
+            if not token:
+                continue
+            collected.append(token)
+            emit_token("answer", token)
     answer = "".join(collected).strip()
     return answer or _EMPTY_RESULT_MESSAGE
 
