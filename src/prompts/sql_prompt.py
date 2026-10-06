@@ -66,6 +66,77 @@ Schema fidelity
 - Do not wrap SQL in markdown fences.
 - One statement only. No trailing semicolon required.
 
+Inventory, sales, checkout, and trade-ins
+------------------------------------------
+vehicle_stock is the dealer inventory of new vehicles. Its availability column
+is stock_status. There is no column named status. Use stock_status exactly.
+
+stock_status meanings:
+- 'In Stock': currently available for sale. This is current stock.
+- 'Reserved': held for a customer. Not available stock.
+- 'Sold': already sold. Not current stock.
+
+Current stock means stock_status = 'In Stock'. Apply that filter when the user
+asks about current stock, current inventory, available stock, currently
+available vehicles, cars currently available, vehicles available for sale,
+how many cars or vehicles are in stock, remaining stock, or remaining inventory.
+Do not count every matching vehicle_stock row. Sold and Reserved rows are not
+current stock.
+
+Examples:
+- "What is the current stock of Baleno in Pune?"
+  SELECT COUNT(*) AS current_stock
+  FROM vehicle_stock
+  WHERE model = 'Baleno' AND location = 'Pune' AND stock_status = 'In Stock'
+- "What is the current stock of Baleno?"
+  SELECT COUNT(*) AS current_stock
+  FROM vehicle_stock
+  WHERE model = 'Baleno' AND stock_status = 'In Stock'
+- "Show current stock by model in Pune."
+  SELECT model, COUNT(*) AS current_stock
+  FROM vehicle_stock
+  WHERE location = 'Pune' AND stock_status = 'In Stock'
+  GROUP BY model
+- "Which models have the highest current stock in Pune?"
+  SELECT model, COUNT(*) AS current_stock
+  FROM vehicle_stock
+  WHERE location = 'Pune' AND stock_status = 'In Stock'
+  GROUP BY model
+  ORDER BY current_stock DESC
+- "How many BMW cars are currently available in Mumbai?"
+  SELECT COUNT(*) AS current_stock
+  FROM vehicle_stock
+  WHERE brand = 'BMW' AND location = 'Mumbai' AND stock_status = 'In Stock'
+
+Reserved vehicles: stock_status = 'Reserved'.
+Example: "How many Baleno cars are reserved in Pune?"
+  SELECT COUNT(*) AS reserved_count
+  FROM vehicle_stock
+  WHERE model = 'Baleno' AND location = 'Pune' AND stock_status = 'Reserved'
+
+Sold vehicles in inventory: stock_status = 'Sold'.
+Completed purchases can also be counted from the sales table.
+Example: "How many Baleno cars were sold in Pune?"
+  SELECT COUNT(*) AS sold_count
+  FROM vehicle_stock
+  WHERE model = 'Baleno' AND location = 'Pune' AND stock_status = 'Sold'
+
+If the user explicitly asks for all vehicles, total historical records, or how
+many rows are present in the vehicle_stock table, do not add a stock_status
+filter.
+Example: "How many Baleno vehicles are present in the vehicle_stock table?"
+  SELECT COUNT(*) AS vehicle_count
+  FROM vehicle_stock
+  WHERE model = 'Baleno'
+
+sales is completed purchases, not current inventory.
+digital_checkout is a purchase opportunity, not a sale.
+trade_in is the old vehicle exchanged on a completed new-vehicle purchase.
+Keep other filters (model, brand, location, dealer) together with the
+stock_status filter the question requires. The schema has no body-style
+column; do not invent one. Still apply stock_status = 'In Stock' when the
+question is about current availability.
+
 Correction attempts
 -------------------
 If a previous SQL attempt and a validation error are provided, treat them as

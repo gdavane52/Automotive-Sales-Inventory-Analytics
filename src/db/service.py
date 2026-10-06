@@ -23,6 +23,7 @@ from src.db.connection import apply_query_timeout, connect, create_readonly_engi
 from src.db.errors import ReadOnlyQueryError, SQLExecutionError, SQLTimeoutError
 from src.db.sql_guard import (
     assert_readonly_select,
+    current_stock_filter_error,
     referenced_qualified_columns,
     referenced_tables,
 )
@@ -299,6 +300,7 @@ def validate_sql(
     query: str,
     db_path: Path | str | None = None,
     timeout_seconds: float | None = None,
+    user_question: str | None = None,
 ) -> dict[str, Any]:
     """Check that a query is a reasonable, read-only SELECT against this schema.
 
@@ -390,6 +392,11 @@ def validate_sql(
             errors.append(f"Could not validate SQL syntax: {exc}")
     finally:
         engine.dispose()
+
+    if user_question:
+        semantic = current_stock_filter_error(user_question, safe_sql)
+        if semantic:
+            errors.append(semantic)
 
     report["valid"] = not errors and report["syntax_ok"]
     return report

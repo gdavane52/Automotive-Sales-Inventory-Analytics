@@ -123,7 +123,10 @@ def validate_sql(state: AnalyticsState) -> dict[str, Any]:
             "validation_error": reason,
         }
     try:
-        report = validate_sql_query(sql)
+        report = validate_sql_query(
+            sql,
+            user_question=(state.get("user_question") or ""),
+        )
     except Exception as exc:
         logger.exception("sql_validation_error")
         return {

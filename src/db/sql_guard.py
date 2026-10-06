@@ -209,6 +209,77 @@ def referenced_tables(query: str) -> list[str]:
     return tables
 
 
+_CURRENT_STOCK = re.compile(
+    r"""
+    current(?:ly)?\s+(?:available\s+)?(?:stock|inventory)
+    | available\s+stock
+    | currently\s+available
+    | available\s+for\s+sale
+    | remaining\s+(?:stock|inventory)
+    | \bin\s+stock\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_NOT_CURRENT_STOCK = re.compile(
+    r"""
+    \breserved\b
+    | \bsold\b
+    | present\s+in
+    | vehicle[_\s]stock\s+table
+    | total\s+(?:historical\s+)?records
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_IN_STOCK_FILTER = re.compile(
+    r"""
+    (?:\b[\w`]+\s*\.\s*)?
+    [`"']?stock_status[`"']?
+    \s*=\s*
+    (['"])In\s+Stock\1
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_CURRENT_STOCK_ERROR = (
+    "Current stock must be read from vehicle_stock with "
+    "stock_status = 'In Stock'. Reserved and Sold vehicles are not available inventory."
+)
+
+
+def asks_current_stock(question: str) -> bool:
+    """True when the question means available inventory, not all stock rows."""
+    text = question or ""
+    if not _CURRENT_STOCK.search(text):
+        return False
+    if _NOT_CURRENT_STOCK.search(text) and not re.search(
+        r"current(?:ly)?\s+(?:available\s+)?(?:stock|inventory)|available\s+stock|"
+        r"currently\s+available|remaining\s+(?:stock|inventory)",
+        text,
+        re.IGNORECASE,
+    ):
+        return False
+    return True
+
+
+def has_in_stock_filter(sql: str) -> bool:
+    """True when SQL filters stock_status to In Stock, ignoring spacing and qualifiers."""
+    return _IN_STOCK_FILTER.search(sql or "") is not None
+
+
+def current_stock_filter_error(question: str, sql: str) -> str | None:
+    """Reject current-stock SQL that does not filter stock_status = 'In Stock'.
+
+    Returns None for other questions, including reserved, sold, and explicit
+    total-record questions. Does not rewrite the SQL.
+    """
+    if not asks_current_stock(question):
+        return None
+    if "vehicle_stock" not in {name.lower() for name in referenced_tables(sql or "")}:
+        return _CURRENT_STOCK_ERROR
+    if not has_in_stock_filter(sql or ""):
+        return _CURRENT_STOCK_ERROR
+    return None
+
+
 def referenced_qualified_columns(query: str) -> list[tuple[str, str]]:
     """Return (table, column) pairs from table.column references."""
     sanitized = strip_comments_and_literals(query)
